@@ -1,0 +1,29 @@
+volumes:
+  postgres_shared_data:
+
+networks:
+  postgres-network:
+    name: postgres-network
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: postgres_shared
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=P@5tgr3s_Db!2025
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_shared_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+    networks:
+      - postgres-network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5

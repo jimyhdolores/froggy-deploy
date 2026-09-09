@@ -1,0 +1,27 @@
+api:
+  dashboard: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: proxy-network
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: admin@froggydevs.com
+      storage: acme.json
+      httpChallenge:
+        entryPoint: web
