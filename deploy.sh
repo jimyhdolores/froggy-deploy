@@ -113,8 +113,16 @@ deploy_tier() {
 	compose="$root/$rel"
 
 	log "--- $APP_SLUG/$tier -> $container ---"
-	[ -f "$compose" ] \
-		|| die "$EX_REGISTRY" "no existe $compose (revisa TIER_${tier}_COMPOSE en $(registry_file "$APP_SLUG"))"
+	if [ ! -f "$compose" ]; then
+		# En un ensayo sobre una app que aun no esta clonada, el compose no puede existir
+		# todavia: el clone no llego a ocurrir. Decirlo, en vez de dar un error de registro
+		# que parece un fallo de configuracion y no lo es.
+		if [ "${DRY_RUN:-0}" = "1" ] && [ ! -d "$root/.git" ]; then
+			warn "no se puede comprobar $rel: el repo aun no esta clonado (el despliegue real lo clonaria antes)"
+			return 0
+		fi
+		die "$EX_REGISTRY" "no existe $compose (revisa TIER_${tier}_COMPOSE en $(registry_file "$APP_SLUG"))"
+	fi
 
 	if [ -n "$env_rel" ]; then
 		[ -f "$root/$env_rel" ] \
