@@ -155,7 +155,7 @@ ni duplicar scripts.
 ```bash
 # apps.d/miapp.conf
 APP_NAME="Mi App"
-APP_REPO="https://github.com/usuario/mi-app.git"
+APP_REPO="git@github.com:usuario/mi-app.git"   # SSH, no HTTPS (ver abajo)
 APP_DIR="mi-app"                       # nombre del directorio bajo ~/apps
 APP_BRANCH="main"
 APP_TIERS="backend frontend"           # tambien fija el orden de despliegue
@@ -177,6 +177,15 @@ TIER_frontend_WAIT="45"
 `TIER_*_COMPOSE` es la ruta **completa** relativa a la raiz del repo, asi que una app puede
 tener su compose donde quiera: `checkout` lo tiene en `infra/` sin subnivel de tier y no
 necesita ningun caso especial.
+
+**`APP_REPO` va con URL SSH (`git@github.com:...`), no HTTPS.** El servidor autentica contra
+GitHub con su propia clave (`~/.ssh/root-jimy`); con HTTPS, un repositorio privado pediria
+credenciales por consola y el clone se colgaria en mitad del despliegue, sin terminal donde
+responder. Comprobar que la clave del servidor tiene acceso al repo nuevo:
+
+```bash
+ssh -T git@github.com          # debe saludar por el usuario correcto
+```
 
 Del lado de la app hacen falta, ademas:
 
