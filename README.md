@@ -6,14 +6,77 @@ Traefik como reverse proxy con HTTPS de Let's Encrypt, un PostgreSQL 17 comparti
 unico script `deploy.sh` que despliega cualquier app por nombre.
 
 ```bash
-./deploy.sh glowpe              # backend y frontend
-./deploy.sh glowpe backend      # solo un tier
-./deploy.sh --all               # infraestructura y todas las apps
+deploy glowpe              # backend y frontend
+deploy glowpe backend      # solo un tier
+deploy --all               # infraestructura y todas las apps
 ```
 
 Cada despliegue actualiza el codigo (`git clone` la primera vez, `git pull` despues),
 comprueba las precondiciones, construye, y **verifica que el contenedor quedo sano** antes de
 reportar exito.
+
+---
+
+## Desplegar desde tu maquina
+
+`deploy` es una funcion que ejecuta `deploy.sh` en el servidor por SSH. **Se instala una vez
+por cada ordenador** desde el que quieras desplegar: la configuracion (el acceso SSH y la
+funcion en tu shell) es local a esa maquina, no del servidor.
+
+```bash
+git clone git@github.com:jimyhdolores/froggy-deploy.git
+cd froggy-deploy
+bash client/install.sh --host 5.78.155.68 --key ~/.ssh/id_rsa_codeabien
+```
+
+En Windows sirve tanto desde Git Bash como desde PowerShell. Desde Git Bash, `install.sh`
+configura **los dos** shells de una vez. Si no tienes Git Bash:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File client\install.ps1 -ServerHost 5.78.155.68 -Key ~\.ssh\id_rsa_codeabien
+```
+
+El instalador anade un `Host froggy` a `~/.ssh/config`, define la funcion `deploy` en tu perfil
+y comprueba que la conexion funciona. Es idempotente: reejecutarlo con otra `--host` o `--key`
+sustituye el bloque anterior en lugar de duplicarlo. **Abre una terminal nueva** despues, para
+que el perfil se cargue.
+
+> Lo unico que el instalador no puede darte es la **clave privada**: es un secreto y no viaja
+> en el repositorio. O la copias desde una maquina que ya funcione, o generas una nueva y
+> autorizas su `.pub` en `~/.ssh/authorized_keys` del servidor. Si no la encuentra, el script
+> te dice como hacer ambas cosas.
+
+Sin instalar nada, el equivalente literal es:
+
+```bash
+ssh froggy 'bash ~/apps/froggy-deploy/deploy.sh glowpe'
+```
+
+Y estando dentro del servidor, `cd ~/apps/froggy-deploy && ./deploy.sh glowpe`. Las tres formas
+acaban en el mismo script: las dos primeras solo ahorran teclas.
+
+### Comandos del dia a dia
+
+| Comando | Que hace |
+|---|---|
+| `deploy --list` | Lista las apps registradas, sus tiers y contenedores |
+| `deploy doctor` | Comprueba el registro contra el disco del servidor. No despliega nada |
+| `deploy <app>` | Despliega todos los tiers de la app |
+| `deploy <app> <tier>` | Despliega solo ese tier (`backend`, `frontend`, `web`) |
+| `deploy <app> --dry-run` | Ensayo: imprime lo que haria, sin clonar ni construir |
+| `deploy --all` | Infraestructura y todas las apps |
+| `deploy infra` | Solo PostgreSQL, Traefik y las bases |
+
+```bash
+deploy glowpe                  # glowpe entero
+deploy glowpe backend          # solo su API
+deploy tours frontend          # solo la web de rutealo
+deploy checkout                # su unico tier: web
+deploy glowpe --dry-run        # ver que haria, sin tocar nada
+```
+
+Ante la duda, `deploy doctor` primero: dice si falta algun `.env` o si un repo no esta clonado,
+sin efectos secundarios.
 
 ---
 
@@ -24,6 +87,9 @@ froggy-deploy/
 ├── deploy.sh                 # punto de entrada unico
 ├── apps.d/                   # EL REGISTRO: un fichero por app
 │   ├── barber.conf  checkout.conf  glowpe.conf  tours.conf
+├── client/                   # configura TU maquina para usar el comando `deploy`
+│   ├── install.sh            # bash: Git Bash, Linux, macOS
+│   └── install.ps1           # PowerShell nativo
 ├── lib/
 │   ├── common.sh             # codigos de salida, log, lock, traps
 │   ├── registry.sh           # carga y validacion de apps.d/*.conf
@@ -52,7 +118,10 @@ fuera del servidor).
 
 ---
 
-## Uso
+## Referencia completa de `deploy.sh`
+
+Todos los objetivos y opciones. Con el comando `deploy` instalado, `deploy <objetivo>` es
+equivalente a `./deploy.sh <objetivo>` en el servidor.
 
 ```
 ./deploy.sh <objetivo> [tier...] [opciones]
@@ -226,6 +295,19 @@ git clone https://github.com/jimyhdolores/froggy-deploy.git
 
 # 5. Todo de una vez (clona las apps que falten)
 cd ~/apps/froggy-deploy && ./deploy.sh --all
+```
+
+El servidor clona las apps por SSH, asi que necesita una clave propia autorizada en GitHub:
+
+```bash
+ssh-keygen -t ed25519 -C "froggy-deploy@servidor"   # y anadir la .pub a GitHub
+ssh -T git@github.com                                # debe saludar por el usuario correcto
+```
+
+Por ultimo, desde tu maquina, para poder desplegar sin entrar al servidor:
+
+```bash
+bash client/install.sh --host <IP> --key ~/.ssh/<tu-clave>
 ```
 
 Los `.env` de produccion no estan en git: hay que copiarlos al servidor antes del primer
