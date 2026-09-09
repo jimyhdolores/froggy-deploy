@@ -1,0 +1,19 @@
+# Todo lo que el servidor Linux ejecuta o lee va con LF, en el indice y en el checkout.
+# Sin esta politica, basta una edicion desde Windows con core.autocrlf=true para que un .sh
+# entre al repositorio con CRLF, y entonces bash falla con
+# "bad interpreter: /usr/bin/env bash^M" o "command not found: docker\r".
+#
+# Es lo que intentaba parchear en tiempo de ejecucion el preambulo `sed -i 's/\r$//'` que
+# llevaban los ocho scripts antiguos. Resuelto aqui, en el checkout, ese preambulo sobra.
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.conf      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sql       text eol=lf
+*.md        text eol=lf
+Dockerfile  text eol=lf
+
+# Almacen de certificados que gestiona Traefik: ni normalizarlo ni volcarlo en los diffs.
+acme.json   -text -diff

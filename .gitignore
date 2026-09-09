@@ -1,0 +1,9 @@
+# Certificados emitidos por Let's Encrypt. Contiene las claves privadas: nunca al repositorio.
+acme.json
+
+# Registro de cada despliegue. deploy.sh conserva los 50 mas recientes.
+logs/
+
+# Locks por app (mkdir atomico). Se limpian solos; si queda uno huerfano, deploy.sh lo detecta
+# comprobando el pid con `kill -0`.
+.locks/
