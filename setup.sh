@@ -56,7 +56,7 @@ echo ""
 
 # 4. Crear bases de datos si no existen
 echo "[*] Verificando bases de datos..."
-for DB_NAME in app_tours_db app_barber_db glowpe_db; do
+for DB_NAME in app_tours_db app_barber_db app_glowpe_db; do
     EXISTS=$(docker exec postgres_shared psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null)
     if [ "$EXISTS" != "1" ]; then
         docker exec postgres_shared psql -U postgres -c "CREATE DATABASE $DB_NAME;" > /dev/null 2>&1

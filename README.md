@@ -18,7 +18,7 @@ froggy-deploy/
 └── postgres/
     ├── docker-compose.yml              # PostgreSQL 17 compartido
     └── init/
-        └── 01-create-databases.sql     # Crea app_barber_db, app_tours_db y glowpe_db al iniciar por primera vez
+        └── 01-create-databases.sql     # Crea app_barber_db, app_tours_db y app_glowpe_db al iniciar por primera vez
 ```
 
 ## Que hace cada componente
@@ -49,7 +49,7 @@ El init script crea las bases de datos la primera vez que el volumen se iniciali
 
 - `app_barber_db`
 - `app_tours_db`
-- `glowpe_db`
+- `app_glowpe_db`
 
 ## Redes Docker
 
@@ -235,12 +235,12 @@ Verificar que existan:
 docker exec postgres_shared psql -U postgres -c "\l"
 ```
 
-Debe aparecer `app_tours_db`, `app_barber_db` y `glowpe_db`. Si alguna no existe, crearla manualmente:
+Debe aparecer `app_tours_db`, `app_barber_db` y `app_glowpe_db`. Si alguna no existe, crearla manualmente:
 
 ```bash
 docker exec postgres_shared psql -U postgres -c "CREATE DATABASE app_tours_db;"
 docker exec postgres_shared psql -U postgres -c "CREATE DATABASE app_barber_db;"
-docker exec postgres_shared psql -U postgres -c "CREATE DATABASE glowpe_db;"
+docker exec postgres_shared psql -U postgres -c "CREATE DATABASE app_glowpe_db;"
 ```
 
 ### 6. Verificar infraestructura
