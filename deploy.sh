@@ -66,6 +66,9 @@ Ejemplos:
 
 Codigos de salida: 0 ok - 2 uso - 10 entorno - 11 registro - 12 git
                    13 env_file - 14 base de datos - 15 build - 16 verificacion - 17 lock
+
+Entorno:
+  BUILD_CACHE_MAX    tope de la cache de build tras cada despliegue (por defecto 10GB)
 EOF
 }
 
@@ -135,6 +138,7 @@ deploy_tier() {
 		docker_require_network postgres-network
 	fi
 
+	compose_assert_project "$compose" "$container" "$APP_SLUG/$tier"
 	compose_validate "$compose"
 	compose_up "$compose"
 	verify_container "$container" "$wait_s"
@@ -171,6 +175,10 @@ cmd_app() {
 	for tier in "${selected[@]}"; do
 		deploy_tier "$tier"
 	done
+
+	# Al final y solo si todos los tiers quedaron sanos: un despliegue fallido sale antes por `die`,
+	# y recortar la cache entonces solo haria mas lento el reintento.
+	docker_builder_gc
 }
 
 cmd_list() {
@@ -203,6 +211,42 @@ doctor_check_crlf() {
 		fi
 	done
 	[ "$bad" -eq 0 ] && ok "todos los ficheros del despliegue estan en LF"
+	return 0
+}
+
+# Lo mismo que compose_assert_project comprueba tier a tier al desplegar, pero de todo el registro
+# a la vez y sin desplegar nada: proyectos compose compartidos y, si hay Docker, contenedores que
+# siguen bajo un proyecto que su compose ya no declara (el proximo deploy se detendria).
+doctor_check_compose_projects() {
+	local owners dups line project owner slug tier container actual have_docker=0
+
+	owners="$(registry_project_owners)"
+	dups="$(sort <<<"$owners" \
+		| awk '{ n[$1]++; o[$1] = o[$1] " " $2 } END { for (p in n) if (n[p] > 1) print p ":" o[p] }' \
+		| sort)"
+	if [ -n "$dups" ]; then
+		while IFS= read -r line; do
+			warn "proyecto compose compartido -> $line (desplegar uno recrearia el contenedor del otro)"
+		done <<<"$dups"
+	else
+		ok "cada tier y la infraestructura tienen su propio proyecto compose"
+	fi
+
+	docker info >/dev/null 2>&1 && have_docker=1
+	if [ "$have_docker" -eq 0 ]; then
+		warn "sin Docker: no se comprueba a que proyecto pertenece cada contenedor"
+		return 0
+	fi
+	while read -r project owner; do
+		case "$owner" in infra/*) continue ;; esac
+		slug="${owner%/*}" tier="${owner#*/}"
+		container="$( (registry_load "$slug"; registry_get "$tier" CONTAINER) )"
+		actual="$(_inspect '{{index .Config.Labels "com.docker.compose.project"}}' "$container")"
+		case "$actual" in
+			"" | "<novalue>" | "$project") ;;
+			*) warn "$container corre bajo el proyecto '$actual' y su compose declara '$project': el proximo 'deploy $slug $tier' se detendra con los pasos del cambio (README, \"Proyecto compose propio\")" ;;
+		esac
+	done <<<"$owners"
 	return 0
 }
 
@@ -249,6 +293,7 @@ cmd_doctor() {
 	done
 	registry_reset
 	printf '\n'
+	doctor_check_compose_projects
 	doctor_check_crlf
 }
 

@@ -69,6 +69,30 @@ registry_get() {                                # $1=tier $2=clave -> valor o va
 	printf '%s\n' "${!ref-}"
 }
 
+# Una linea "proyecto slug/tier" por cada tier registrado cuyo compose esta en disco, mas los dos
+# proyectos de la infraestructura: lo que comparan compose_assert_project y `doctor` para que dos
+# piezas no compartan proyecto compose. Una app con su compose en una carpeta `postgres/`, sin
+# `name:` y con un servicio `postgres` -como los de desarrollo de tours y barber- recrearia
+# postgres_shared igual que glowpe y tours se recreaban entre si.
+# Cada app se lee en un subshell, porque registry_load reescribe las globales APP_*/TIER_* de quien
+# llama. Las apps deshabilitadas cuentan igual: siguen pudiendo desplegarse a mano.
+registry_project_owners() {
+	local slug
+	printf '%s infra/postgres\n' "$(compose_project_name "$SCRIPT_DIR/postgres/docker-compose.yml")"
+	printf '%s infra/traefik\n' "$(compose_project_name "$SCRIPT_DIR/docker-compose.yml")"
+	for slug in $(registry_slugs); do
+		(
+			registry_load "$slug"
+			for tier in $APP_TIERS; do
+				compose="$APPS_DIR/$APP_DIR/$(registry_get "$tier" COMPOSE)"
+				if [ -f "$compose" ]; then
+					printf '%s %s/%s\n' "$(compose_project_name "$compose")" "$slug" "$tier"
+				fi
+			done
+		)
+	done
+}
+
 registry_has_tier() {                           # $1=tier ; usa el APP_TIERS ya cargado
 	case " $APP_TIERS " in
 		*" $1 "*) return 0 ;;

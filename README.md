@@ -185,7 +185,67 @@ prioridad 20, y el frontend recoge el resto con prioridad 10.
    `APP_DB_BOOTSTRAP_SQL`, lo ejecuta **solo** cuando acaba de crear la base y esta no tiene
    esquemas de usuario.
 3. **Por cada tier:** comprueba el compose, el `env_file` requerido y las redes externas;
-   valida el compose; construye y recrea; y verifica el contenedor.
+   comprueba que su proyecto compose sea solo suyo (ver abajo); valida el compose; construye y
+   recrea; y verifica el contenedor.
+4. **Recorta la cache de build**, solo si todos los tiers quedaron sanos: `docker builder prune`
+   con `--max-used-space` (por defecto 10 GB, se cambia con `BUILD_CACHE_MAX`) y
+   `docker image prune` de las imagenes colgantes. Un fallo aqui solo avisa: la app ya esta
+   desplegada.
+
+### La cache de build tiene tope
+
+Cada despliegue hace `docker compose up --build`, y BuildKit guarda las capas intermedias de
+cada build para acelerar el siguiente. Nada las borraba: el 2026-10-02 ocupaban **45 GB de los
+75** del disco, y el panel de Hetzner no lo muestra (enseña el tamano del disco, no su uso). Con
+el disco lleno PostgreSQL deja de escribir y se cae todo.
+
+Desde entonces cada despliegue termina recortandola. `--max-used-space` conserva lo usado mas
+recientemente, asi que el build siguiente sigue siendo incremental. Para medirlo a mano, sin
+tocar nada:
+
+```bash
+df -h /                     # disco: usado y libre
+docker buildx du | tail -4  # cache de build: total y recuperable
+```
+
+### Proyecto compose propio
+
+Compose reconoce los contenedores de un servicio por **proyecto + servicio**, no por
+`container_name`. Sin `name:` en el compose, el proyecto es el nombre de su carpeta. Hasta el
+2026-10-02, glowpe, tours y barber tenian su backend en `infra/backend/` (proyecto `backend`,
+servicio `api`) y su frontend en `infra/frontend/` (`frontend`, `web`). Para compose eran la misma
+app: desplegar el backend de tours **borraba `glowpe-api`** y levantaba `tours-api` en su lugar, y
+el despliegue terminaba en verde. Se comprobo reproduciendolo en local.
+
+Por eso cada compose declara su proyecto en la primera linea, `<slug>-<tier>`:
+
+```yaml
+name: glowpe-backend
+```
+
+`deploy.sh` lo vigila en cada tier, **antes de construir**, en dos pasos (codigo de salida 11):
+
+- **Ninguna otra pieza puede resolver el mismo proyecto.** Se compara con todos los tiers del
+  registro, habilitados o no, y con los dos proyectos de la infraestructura (`postgres` y
+  `froggy-deploy`). Sin esta comprobacion el `up` no fallaria: borraria el contenedor ajeno.
+- **El contenedor que ya corre tiene que ser de ese proyecto.** No se comprueba en `--dry-run`.
+
+**Cambiar de proyecto** -al estrenar el `name:` o al renombrarlo- se hace una vez por tier.
+Compose no adopta el contenedor creado bajo el nombre anterior: el `up` fallaria por conflicto de
+nombre, sin tocarlo. `deploy.sh` se detiene antes y dice los pasos; para el backend de glowpe:
+
+```bash
+./deploy.sh glowpe backend          # actualiza el codigo y se detiene con los pasos de abajo
+docker compose -f ~/apps/glowpe/infra/backend/docker-compose.yml build   # el viejo sigue sirviendo
+docker rm -f glowpe-api             # desde aqui, la caida: lo que tarde en arrancar
+./deploy.sh glowpe backend --no-pull --no-build
+```
+
+`--no-pull` despliega exactamente lo que se acaba de construir. Con el frontend es igual
+(`glowpe-web`). La imagen tambien cambia de nombre: `backend-api` pasa a `glowpe-backend-api`.
+Por eso los scripts de operacion toman la imagen por su ID (`docker inspect -f '{{.Image}}' <contenedor>`).
+
+`./deploy.sh doctor` revisa las dos condiciones de todo el registro a la vez, sin desplegar.
 
 ### Cuando aborta, y por que
 
@@ -263,6 +323,12 @@ Del lado de la app hacen falta, ademas:
 2. El subdominio apuntando por DNS a la IP del servidor.
 3. El `.env` de produccion copiado al servidor, si su compose lo referencia por `env_file`
    (no viaja por git).
+4. Los **volumenes externos** que declare su compose (`external: true`), creados una vez. Si
+   faltan, `docker compose up` falla antes de recrear el contenedor —el viejo sigue sirviendo—
+   con «external volume ... not found». Hoy solo glowpe tiene uno: `glowpe-media`, ver abajo.
+5. Un **`name:` propio** en la primera linea de cada compose, `<slug>-<tier>` (ver «Proyecto
+   compose propio»). Sin el, el proyecto es el nombre de la carpeta -`backend`, `frontend`,
+   `infra`-, que cualquier otra app puede repetir, y `deploy.sh` se negaria a desplegar la segunda.
 
 Comprobar que todo cuadra antes de desplegar:
 
@@ -312,6 +378,18 @@ bash client/install.sh --host <IP> --key ~/.ssh/<tu-clave>
 
 Los `.env` de produccion no estan en git: hay que copiarlos al servidor antes del primer
 despliegue de cada backend. `deploy.sh` se detiene con el codigo 13 y dice cual falta.
+
+Y los volumenes externos de las apps, tambien una sola vez. El de glowpe guarda las imagenes del
+catalogo (RN-PROD-47) y su contenedor corre como `node` (uid 1000), asi que el volumen se crea y
+se le da ese dueno:
+
+```bash
+docker volume create glowpe-media
+docker run --rm -v glowpe-media:/data/media alpine chown 1000:1000 /data/media
+```
+
+**No esta en el `pg_dump`.** Se respalda aparte, junto con la base:
+`tar czf /root/backups/glowpe-media-$(date +%F).tgz -C /var/lib/docker/volumes/glowpe-media/_data .`
 
 > Las bases de datos las crea `deploy.sh` a partir del registro. Un `docker compose up` del
 > postgres a pelo ya no las crea: antes lo hacia un `init/01-create-databases.sql` que era una

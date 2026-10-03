@@ -35,6 +35,62 @@ compose_validate() {
 	fi
 }
 
+# --- Proyecto compose -------------------------------------------------------------------------
+# Compose reconoce los contenedores de un servicio por PROYECTO + SERVICIO, no por
+# `container_name`. Dos apps cuyos compose resuelven el mismo proyecto y llaman igual a su servicio
+# son, para compose, la misma: desplegar una "recrea" el contenedor de la otra -lo borra y levanta
+# el propio- y el despliegue termina en verde. Pasaba con glowpe, tours y barber: compose en
+# `infra/backend/` (proyecto `backend`, servicio `api`) y en `infra/frontend/` (`frontend`, `web`).
+# Se comprobo el 2026-10-02 reproduciendolo en local.
+
+# El proyecto que compose resolvera para un archivo: su `name:` de primer nivel o, sin el, el nombre
+# de su carpeta, normalizado igual que compose (minusculas; solo a-z, 0-9, `_` y `-`). Sin docker a
+# proposito: sirve en el ensayo y en `doctor`, y no depende de que exista el `.env` de cada app.
+compose_project_name() {                        # $1 = ruta del compose
+	local name
+	name="$(sed -n -E 's/^name:[[:space:]]*["'\'']?([^"'\''#[:space:]]+).*/\1/p' "$1" | head -1)"
+	if [ -z "$name" ]; then
+		name="$(basename "$(dirname "$1")")"
+	fi
+	printf '%s\n' "$name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-'
+}
+
+# Antes de construir, dos condiciones sobre el proyecto de este tier, porque los dos fallos se ven
+# tarde o no se ven:
+#   1. Ninguna otra app del registro puede resolver el mismo proyecto. Si no, el `up` no falla: borra
+#      el contenedor ajeno y sigue.
+#   2. El contenedor que ya corre tiene que ser de este proyecto. Si el compose cambio de nombre,
+#      compose no adopta el contenedor viejo y el `up` falla por conflicto de nombre DESPUES de
+#      construir. Aqui se detecta antes y se dicen los pasos del cambio, que se hace una sola vez.
+compose_assert_project() {                      # $1=compose $2=contenedor $3=slug/tier
+	local compose="$1" container="$2" self="$3" project owners other owner actual
+
+	project="$(compose_project_name "$compose")"
+
+	# Leida entera ANTES del bucle, no con `< <(...)`: el `die` cortaria la lectura con el
+	# subshell aun escribiendo, y su SIGPIPE dispararia el trap ERR con una traza sin sentido.
+	owners="$(registry_project_owners)"
+	while read -r other owner; do
+		if [ "$other" = "$project" ] && [ "$owner" != "$self" ]; then
+			die "$EX_REGISTRY" "el proyecto compose '$project' de $self es tambien el de $owner: desplegar uno recrearia el contenedor del otro. Declara un 'name:' propio en el compose de cada uno (README, \"Proyecto compose propio\")"
+		fi
+	done <<<"$owners"
+
+	[ "${DRY_RUN:-0}" = "1" ] && return 0
+
+	actual="$(_inspect '{{index .Config.Labels "com.docker.compose.project"}}' "$container")"
+	case "$actual" in
+		"" | "<novalue>" | "$project") return 0 ;;   # no existe todavia, no es de compose, o es el suyo
+	esac
+
+	# El codigo ya esta actualizado (git_ensure_repo corrio antes), por eso el ultimo paso lleva
+	# --no-pull: despliega exactamente la imagen que se acaba de construir.
+	die "$EX_REGISTRY" "el contenedor '$container' corre bajo el proyecto compose '$actual' y su compose declara ahora '$project'. Compose no lo adopta: el 'up' fallaria por conflicto de nombre, sin tocarlo. Es el cambio de proyecto y se hace UNA vez, construyendo antes para que la caida dure solo el arranque:
+    docker compose -f $compose build
+    docker rm -f $container
+    $SCRIPT_DIR/deploy.sh ${self%/*} ${self#*/} --no-pull --no-build"
+}
+
 compose_up() {
 	local compose="$1"
 	local args=(-f "$compose" up -d --force-recreate)
@@ -110,6 +166,43 @@ verify_container() {                            # $1=nombre  $2=presupuesto en s
 		sleep 3
 		waited=$((waited + 3))
 	done
+}
+
+# Recorta la cache de build de BuildKit a un tope y borra las imagenes colgantes que deja cada
+# rebuild. Sin esto la cache crece con cada despliegue (`up --build`) y nada la limpia: el
+# 2026-10-02 ocupaba 45 GB de los 75 del disco del servidor. Con el disco lleno PostgreSQL deja
+# de escribir y se cae todo, no solo la app que se despliega.
+#
+# `--max-used-space` conserva lo usado mas recientemente hasta el tope, asi que el siguiente
+# build sigue siendo incremental. El tope se cambia con BUILD_CACHE_MAX (por defecto 10GB).
+#
+# Corre con la app ya desplegada y verificada, y por eso un fallo aqui NUNCA hace fallar el
+# despliegue: solo avisa. La salida detallada (una linea por registro borrado) va al log, no a
+# la consola.
+docker_builder_gc() {
+	local cap="${BUILD_CACHE_MAX:-10GB}" before after failed=0
+
+	if [ "${DRY_RUN:-0}" = "1" ]; then
+		log "DRY-RUN  recortar la cache de build a $cap y borrar las imagenes colgantes"
+		return 0
+	fi
+
+	before="$(df -h / 2>/dev/null | awk 'NR==2 {print $4}')" || true
+	run_logged docker builder prune -f --max-used-space "$cap" >/dev/null || {
+		warn "no se pudo recortar la cache de build (el despliegue sigue siendo valido)"
+		failed=1
+	}
+	run_logged docker image prune -f >/dev/null || {
+		warn "no se pudieron borrar las imagenes colgantes (el despliegue sigue siendo valido)"
+		failed=1
+	}
+	after="$(df -h / 2>/dev/null | awk 'NR==2 {print $4}')" || true
+
+	if [ "$failed" -eq 0 ]; then
+		ok "cache de build recortada a $cap: espacio libre en / ${before:-?} -> ${after:-?}"
+	else
+		warn "limpieza incompleta: espacio libre en / ${before:-?} -> ${after:-?}"
+	fi
 }
 
 _verify_fail() {
