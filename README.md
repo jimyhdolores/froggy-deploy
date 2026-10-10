@@ -15,6 +15,11 @@ Cada despliegue actualiza el codigo (`git clone` la primera vez, `git pull` desp
 comprueba las precondiciones, construye, y **verifica que el contenedor quedo sano** antes de
 reportar exito.
 
+**glowpe ya no se construye aqui.** Esta en *modo registro*: GitHub Actions construye sus imagenes,
+las publica en GHCR y, en cada push a `main` con las pruebas en verde, la despliega solo. El
+servidor solo descarga y arranca. Ver «Modo registro y despliegue automatico». Las demas apps
+siguen construyendo en el servidor.
+
 ---
 
 ## Desplegar desde tu maquina
@@ -66,6 +71,9 @@ acaban en el mismo script: las dos primeras solo ahorran teclas.
 | `deploy <app> --dry-run` | Ensayo: imprime lo que haria, sin clonar ni construir |
 | `deploy --all` | Infraestructura y todas las apps |
 | `deploy infra` | Solo PostgreSQL, Traefik y las bases |
+| `deploy <app> --history` | Modo registro: los ultimos despliegues, con sus commits |
+| `deploy <app> --tag <commit>` | Modo registro: volver a las imagenes de ese commit |
+| `deploy <app> --pause` / `--resume` | Modo registro: pausar o reanudar el despliegue automatico |
 
 ```bash
 deploy glowpe                  # glowpe entero
@@ -90,13 +98,18 @@ froggy-deploy/
 ├── client/                   # configura TU maquina para usar el comando `deploy`
 │   ├── install.sh            # bash: Git Bash, Linux, macOS
 │   └── install.ps1           # PowerShell nativo
+├── ci/
+│   └── entry.sh              # comando forzado de la llave SSH del despliegue automatico
 ├── lib/
 │   ├── common.sh             # codigos de salida, log, lock, traps
 │   ├── registry.sh           # carga y validacion de apps.d/*.conf
 │   ├── git.sh                # clone / fetch / fast-forward, SHA antes->despues
 │   ├── docker.sh             # guardas, redes, compose, verificacion del contenedor
+│   ├── image.sh              # modo registro: descarga, comprobacion previa, vuelta atras
+│   ├── state.sh              # pausa del despliegue automatico e historial
 │   ├── db.sh                 # espera de postgres, creacion de bases, bootstrap SQL
 │   └── infra.sh              # postgres + traefik + acme.json
+├── state/                    # pausa e historial de cada app (no versionado)
 ├── docker-compose.yml        # Traefik v3.6
 ├── traefik.yml               # configuracion estatica de Traefik
 ├── postgres/docker-compose.yml   # PostgreSQL 17 compartido
@@ -145,6 +158,15 @@ Opciones:
   --fail-fast        en --all, abortar en el primer fallo
   --apps-dir <ruta>  raiz donde viven los repos
   --dry-run          imprime lo que haria, sin clonar, construir ni tocar la base
+
+Solo en modo registro:
+  --tag <commit>     desplegar las imagenes de un commit ya publicado, sin mover el checkout
+  --pull-only        codigo, descarga y comprobacion previa, sin sustituir nada
+  --allow-drift      desplegar aunque la comprobacion previa vea deriva de esquema
+  --build-local      via de emergencia: construir en el servidor
+  --pause, --resume  pausar o reanudar el despliegue automatico
+  --history          los ultimos despliegues de la app
+  --auto --sha <sha> el despliegue que lanza el CI (ci/entry.sh)
 ```
 
 ### Codigos de salida
@@ -156,7 +178,8 @@ el texto:
 |---|---|---|---|
 | `0` ok | `2` uso | `10` entorno | `11` registro |
 | `12` git | `13` falta el `.env` | `14` base de datos | `15` build |
-| `16` verificacion | `17` lock | | |
+| `16` verificacion | `17` lock | `18` retenido (esquema) | `19` imagen no disponible |
+| `20` vuelta atras fallida | | | |
 
 ---
 
@@ -176,7 +199,8 @@ prioridad 20, y el frontend recoge el resto con prioridad 10.
 
 ## Como se despliega una app
 
-`deploy.sh` hace esto por cada app, en este orden:
+`deploy.sh` hace esto por cada app en modo build, que es el de todas salvo glowpe (para ese, ver
+«Modo registro y despliegue automatico»), en este orden:
 
 1. **Codigo primero.** Si el repo no esta, lo clona (con el nombre de destino que fija
    `APP_DIR`); si esta, hace `fetch` y `merge --ff-only`. Reporta `SHA antes -> despues` y
@@ -276,6 +300,120 @@ Al fallar imprime `RestartCount` y las ultimas 40 lineas de log del contenedor, 
 
 ---
 
+## Modo registro y despliegue automatico
+
+Una app esta en **modo registro** si sus tiers declaran `TIER_*_IMAGE`. Hoy solo glowpe. Nada se
+construye en el servidor: el `ng build` llegaba a 2,9 GB y el kernel lo mataba en un servidor de 4 GB
+sin swap (2026-10-09 y 2026-10-10), y cuando fallaba a mitad dejaba el backend nuevo con el frontend
+viejo.
+
+```
+push a main ─► GitHub Actions: pruebas + job `images` ─► ghcr.io/jimyhdolores/glowpe-{api,web}:<sha>
+            └► job `deploy` (con todo en verde) ─ ssh, llave limitada ─► ci/entry.sh
+                 └► deploy.sh glowpe --auto --sha <sha>
+```
+
+La etiqueta de cada imagen es el **SHA completo** del commit, y la imagen lo lleva tambien en su
+etiqueta OCI `org.opencontainers.image.revision`: `deploy glowpe --list` dice que commit corre cada
+tier. El compose declara `image: <repo>:${IMAGE_TAG:-local}` y `deploy.sh` escribe el `IMAGE_TAG`
+desplegado en el `.env` de la carpeta del compose (git lo ignora), asi que un `docker compose up` a
+mano levanta lo desplegado y no otra cosa.
+
+### Que hace `deploy.sh` en modo registro
+
+1. **Codigo.** Avanza el checkout con `--ff-only`: el compose, el `.env` y los scripts de
+   migracion salen de ahi. En `--auto`, exactamente hasta el commit pedido; si el checkout ya va
+   por delante, otro despliegue mas nuevo llego antes y este sale con 0 («obsoleto»).
+2. **Guardas, solo en `--auto`:**
+   - **Pausa** (ver abajo): sale con 0 sin tocar nada, ni el checkout.
+   - **Esquema:** si entre el commit que corre y el destino cambia algo de `APP_SCHEMA_PATHS`
+     (`tenant.sql`, `init-glowpe-db.sql`, `scripts/migrate-*`), sale con **18**, **retenido**: la
+     ventana de migracion la lleva una persona.
+   - **Que tiers:** solo los que cambiaron en sus `TIER_*_SOURCES`, que son las rutas que copia su
+     Dockerfile. Un commit de documentacion o de pruebas no reinicia la API.
+3. **Preparar TODOS los tiers antes de tocar nada:** las comprobaciones de siempre, la descarga y
+   la **comprobacion previa**. La comprobacion previa lanza la imagen nueva del backend en un
+   contenedor efimero contra la base, con `SCHEMA_CHECK_ONLY=1`: compara las entidades con el
+   esquema de **todos** los tenants y sale con 3 si no encajan. Entonces `deploy.sh` sale con 18 y
+   produccion sigue intacta. La imagen declara que sabe hacerlo con la etiqueta `froggy.preflight`;
+   sin ella no se lanza, porque arrancaria como un backend normal, crones incluidos.
+4. **Aplicar, tier a tier:** `up --no-build --pull never`, verificar, y comprobar que el contenedor
+   corre la revision esperada.
+5. **Vuelta atras, solo en `--auto`:** si algo falla con un tier ya sustituido, se vuelve a su
+   imagen anterior (etiquetada `<repo>:rollback` justo antes), se pausa el automatico y se sale
+   con 16. Si la vuelta atras tambien falla, con **20**. A mano no hay vuelta atras automatica: en
+   una ventana «desplegar y luego migrar», el bucle de reinicio es lo esperado.
+6. **Historial** (`--history`) y **retencion:** se conservan en local las 5 imagenes de commit mas
+   recientes por repo (`IMAGE_KEEP`), mas la que corre y la de `rollback`.
+
+`--auto` sale con 0 en los casos «obsoleto», «en pausa» y «ningun tier cambio», y lo dice con una
+linea que empieza por `AUTO:`.
+
+### Cambios de esquema
+
+Un push que cambia el esquema queda **retenido** (18, en rojo en GitHub) y produccion no se toca.
+La ventana sigue el runbook de glowpe (`docs/operaciones-datos.md`):
+
+```bash
+deploy glowpe --pull-only   # checkout e imagenes al dia, comprobacion previa informativa; pausa el automatico
+# dump, y el script de migracion con --apply (como siempre)
+deploy glowpe               # pasa la comprobacion previa, despliega y quita la pausa
+```
+
+Si el orden es desplegar y despues migrar (retirar columnas o tablas), `deploy glowpe --allow-drift`.
+
+### La pausa
+
+Detiene solo el despliegue automatico; los manuales siguen funcionando. La activan las operaciones
+que dejan produccion a proposito en un estado que el siguiente push desharia:
+
+- `--tag`
+- `--pull-only`
+- `--allow-drift`
+- `--build-local`
+- la vuelta atras automatica
+- `--pause`
+
+La quita un `deploy <app>` manual de todos los tiers que termine sano, o `--resume`. Para pausar
+**todas** las apps desde GitHub sin entrar al servidor, la variable `AUTO_DEPLOY=false` del repo.
+
+### Volver atras
+
+```bash
+deploy glowpe --history          # que corre y que corrio antes
+deploy glowpe --tag 9e42929      # las imagenes de ese commit; admite el SHA corto
+```
+
+`--tag` no mueve el checkout y pausa el automatico. La comprobacion previa tambien corre: si el
+esquema ya avanzo, la imagen vieja no encaja y se retiene. Volver atras entonces exige deshacer
+tambien el esquema, desde el dump.
+
+### Configuracion, una sola vez
+
+- **Login en GHCR** (las imagenes son privadas). Un token *classic* con solo `read:packages`;
+  los *fine-grained* no sirven para GHCR. En el servidor: `docker login ghcr.io -u <usuario>`.
+  Cuando caduque, los despliegues saldran con 19 y lo diran.
+- **La llave del CI**, en `~/.ssh/authorized_keys`, limitada a un comando:
+
+  ```
+  restrict,command="/bin/bash /root/apps/froggy-deploy/ci/entry.sh" ssh-ed25519 AAAA... github-actions
+  ```
+
+  `ci/entry.sh` solo acepta `<app> <sha de 40>` y lanza `deploy.sh --auto` desacoplado de la
+  conexion: si el job de Actions se corta, el despliegue no se queda a medias.
+- **En el repo de la app**, en GitHub:
+  - el secreto `DEPLOY_SSH_KEY`, con la llave privada;
+  - las variables `DEPLOY_HOST`, `DEPLOY_KNOWN_HOSTS` y `AUTO_DEPLOY=true`.
+
+### Via de emergencia
+
+Si GitHub Actions o GHCR no estan disponibles, `deploy glowpe --build-local` construye en el servidor
+como antes. El Dockerfile del frontend lleva los topes de memoria que lo hacen caber. La imagen
+resultante no lleva etiqueta de revision, asi que el automatico queda en pausa hasta el siguiente
+`deploy glowpe` normal.
+
+---
+
 ## Anadir una app nueva
 
 **Crear un fichero en `apps.d/`.** Nada mas: ni tocar `deploy.sh`, ni editar otros ficheros,
@@ -370,6 +508,9 @@ ssh-keygen -t ed25519 -C "froggy-deploy@servidor"   # y anadir la .pub a GitHub
 ssh -T git@github.com                                # debe saludar por el usuario correcto
 ```
 
+Las apps en modo registro necesitan ademas el login en GHCR y, si se despliegan solas, la llave del
+CI: ver «Modo registro y despliegue automatico», «Configuracion, una sola vez».
+
 Por ultimo, desde tu maquina, para poder desplegar sin entrar al servidor:
 
 ```bash
@@ -411,8 +552,12 @@ docker exec postgres_shared psql -U postgres -c "\l"
 curl -s https://glowpe.froggydevs.com/api/health
 curl -s https://rutealo.froggydevs.com/api/health
 
-# El log del ultimo despliegue
+# El log del ultimo despliegue (los del CI, ademas, en logs/ci-*.out)
 ls -t ~/apps/froggy-deploy/logs/ | head -1
+
+# Modo registro: que commit corre cada tier, y que corrio antes
+./deploy.sh --list
+./deploy.sh glowpe --history
 ```
 
 Un alias comodo para el `~/.bashrc` del servidor:
@@ -435,4 +580,6 @@ alias dep='~/apps/froggy-deploy/deploy.sh'
   scripts antiguos llevaban un preambulo `sed -i 's/\r$//'` que reescribia el propio script en
   ejecucion; se elimino, y `./deploy.sh doctor` avisa si algun fichero llega con CRLF.
 - **Despliegues concurrentes.** Cada app se despliega bajo un lock; un segundo intento sale
-  con 17 en vez de competir por el mismo build. Con `--wait-lock` se encola.
+  con 17 en vez de competir por el mismo build. Con `--wait-lock` se encola, hasta
+  `LOCK_WAIT_MAX` (30 min): es lo que hace el despliegue automatico, que asi espera detras de un
+  despliegue manual en curso.

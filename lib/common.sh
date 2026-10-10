@@ -16,6 +16,9 @@ readonly EX_DB=14         # postgres inalcanzable, CREATE DATABASE o bootstrap f
 readonly EX_BUILD=15      # docker compose build/up fallo
 readonly EX_VERIFY=16     # el contenedor no quedo sano
 readonly EX_LOCK=17       # otro despliegue de la misma app en curso
+readonly EX_HELD=18       # retenido: cambio de esquema o deriva; requiere la ventana de migracion
+readonly EX_IMAGE=19      # la imagen no esta publicada, o GHCR rechaza las credenciales
+readonly EX_ROLLBACK=20   # fallo el despliegue Y la vuelta atras: el tier puede estar caido
 
 LOG_FILE="${LOG_FILE:-/dev/null}"
 
@@ -75,7 +78,7 @@ lock_acquire() {
 	# En dos sentencias a proposito: `local a="$1" b="...$a..."` NO funciona bajo `set -u`,
 	# porque bash expande todos los argumentos de `local` ANTES de crear las variables, asi
 	# que ahi $key todavia no existe.
-	local key="$1" owner path
+	local key="$1" owner path waited=0
 	path="$LOCK_DIR/$key.lock"
 	[ "${DRY_RUN:-0}" = "1" ] && return 0
 	mkdir -p "$LOCK_DIR"
@@ -89,8 +92,14 @@ lock_acquire() {
 		if [ "${WAIT_LOCK:-0}" != "1" ]; then
 			die "$EX_LOCK" "ya hay un despliegue de '$key' en curso (pid ${owner:-?}). Encola con --wait-lock."
 		fi
+		# Con tope: el despliegue automatico se encola asi detras de una ventana de migracion, y
+		# sin limite se quedaria esperando sin fin a un despliegue manual colgado.
+		if [ "$waited" -ge "${LOCK_WAIT_MAX:-1800}" ]; then
+			die "$EX_LOCK" "el lock de '$key' sigue tomado tras ${waited}s (pid ${owner:-?})"
+		fi
 		log "esperando el lock de '$key' (pid ${owner:-?})..."
 		sleep 5
+		waited=$((waited + 5))
 	done
 	printf '%s\n' "$$" >"$path/pid"
 	LOCK_PATH="$path"
@@ -104,6 +113,20 @@ lock_release() {
 # --- Traps --------------------------------------------------------------------------------
 # `set -E` en deploy.sh es imprescindible para que el trap ERR se herede dentro de funciones.
 _on_err()  { _emit "[ERROR] exit $? en la linea ${BASH_LINENO[0]}: $BASH_COMMAND" >&2; }
-_on_exit() { lock_release; }
+
+# ON_EXIT_HOOK: una funcion que corre al salir, con el codigo de salida como argumento, ANTES de
+# soltar el lock. Es donde engancha la vuelta atras del despliegue automatico (lib/image.sh): los
+# fallos salen por `die`, que hace `exit` desde cualquier profundidad, y el trap es el unico punto
+# por el que pasan todos. Puede cambiar el codigo final fijando EXIT_OVERRIDE.
+ON_EXIT_HOOK=""
+EXIT_OVERRIDE=""
+_on_exit() {
+	local rc=$?
+	if [ -n "$ON_EXIT_HOOK" ]; then
+		"$ON_EXIT_HOOK" "$rc" || true
+	fi
+	lock_release
+	exit "${EXIT_OVERRIDE:-$rc}"
+}
 trap _on_err ERR
 trap _on_exit EXIT

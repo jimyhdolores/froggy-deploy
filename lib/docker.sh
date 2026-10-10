@@ -83,6 +83,15 @@ compose_assert_project() {                      # $1=compose $2=contenedor $3=sl
 		"" | "<novalue>" | "$project") return 0 ;;   # no existe todavia, no es de compose, o es el suyo
 	esac
 
+	# En modo registro no se construye nada: se descarga la imagen antes de retirar el contenedor, por
+	# lo mismo, para que la caida dure solo el arranque.
+	if [ -n "$(registry_get "${self#*/}" IMAGE)" ]; then
+		die "$EX_REGISTRY" "el contenedor '$container' corre bajo el proyecto compose '$actual' y su compose declara ahora '$project'. Compose no lo adopta: el 'up' fallaria por conflicto de nombre, sin tocarlo. Es el cambio de proyecto y se hace UNA vez, con la imagen ya descargada para que la caida dure solo el arranque:
+    $SCRIPT_DIR/deploy.sh ${self%/*} --pull-only
+    docker rm -f $container
+    $SCRIPT_DIR/deploy.sh ${self%/*} ${self#*/}"
+	fi
+
 	# El codigo ya esta actualizado (git_ensure_repo corrio antes), por eso el ultimo paso lleva
 	# --no-pull: despliega exactamente la imagen que se acaba de construir.
 	die "$EX_REGISTRY" "el contenedor '$container' corre bajo el proyecto compose '$actual' y su compose declara ahora '$project'. Compose no lo adopta: el 'up' fallaria por conflicto de nombre, sin tocarlo. Es el cambio de proyecto y se hace UNA vez, construyendo antes para que la caida dure solo el arranque:
@@ -212,7 +221,17 @@ _verify_fail() {
 	restarts="$(_inspect '{{.RestartCount}}' "$name")"
 	restarts="${restarts:-?}"
 	warn "$name: $reason (RestartCount=$restarts)"
-	warn "ultimas 40 lineas de log de $name:"
-	docker logs --tail 40 "$name" 2>&1 | sed 's/^/    /' >&2 || true
+	# En --auto la salida de deploy.sh acaba en los logs de GitHub Actions, y el log de la app puede
+	# llevar datos de clientes: ahi solo va al log del servidor.
+	if [ "${AUTO:-0}" = "1" ]; then
+		warn "las ultimas 40 lineas de log de $name estan en el log del servidor: $LOG_FILE"
+		{
+			printf '\n--- ultimas 40 lineas de log de %s ---\n' "$name"
+			docker logs --tail 40 "$name" 2>&1
+		} >>"$LOG_FILE" 2>/dev/null || true
+	else
+		warn "ultimas 40 lineas de log de $name:"
+		docker logs --tail 40 "$name" 2>&1 | sed 's/^/    /' >&2 || true
+	fi
 	die "$EX_VERIFY" "verificacion de '$name' fallida"
 }

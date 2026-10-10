@@ -7,3 +7,6 @@ logs/
 # Locks por app (mkdir atomico). Se limpian solos; si queda uno huerfano, deploy.sh lo detecta
 # comprobando el pid con `kill -0`.
 .locks/
+
+# Estado de cada app en el servidor: la pausa del despliegue automatico y el historial.
+state/

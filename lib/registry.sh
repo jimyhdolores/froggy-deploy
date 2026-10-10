@@ -24,7 +24,7 @@ registry_slugs() {                              # orden lexicografico = determin
 registry_reset() {
 	local var
 	for var in APP_SLUG APP_NAME APP_REPO APP_DIR APP_BRANCH APP_TIERS \
-		APP_ENABLED APP_DB APP_DB_BOOTSTRAP_SQL; do
+		APP_ENABLED APP_DB APP_DB_BOOTSTRAP_SQL APP_AUTO_DEPLOY APP_SCHEMA_PATHS; do
 		unset "$var" || true
 	done
 	for var in $(compgen -v TIER_ 2>/dev/null || true); do
@@ -43,6 +43,7 @@ registry_load() {                               # $1 = slug
 	source "$file" || die "$EX_REGISTRY" "no se pudo interpretar $file"
 	APP_SLUG="$slug"
 	: "${APP_ENABLED:=1}" "${APP_DB:=}" "${APP_DB_BOOTSTRAP_SQL:=}"
+	: "${APP_AUTO_DEPLOY:=0}" "${APP_SCHEMA_PATHS:=}"
 	registry_validate "$file"
 }
 
@@ -62,6 +63,26 @@ registry_validate() {
 			[ -n "${!ref-}" ] || die "$EX_REGISTRY" "$file: falta $ref ('$tier' esta en APP_TIERS)"
 		done
 	done
+	# Modo registro (TIER_*_IMAGE) en todos los tiers o en ninguno: un despliegue mixto tendria
+	# que construir unos y descargar otros, y la vuelta atras automatica solo sabe de imagenes.
+	local with_image=0 total=0
+	for tier in $APP_TIERS; do
+		total=$((total + 1))
+		ref="TIER_${tier}_IMAGE"
+		[ -z "${!ref-}" ] || with_image=$((with_image + 1))
+	done
+	if [ "$with_image" -ne 0 ] && [ "$with_image" -ne "$total" ]; then
+		die "$EX_REGISTRY" "$file: TIER_*_IMAGE en $with_image de $total tiers. Declaralo en todos o en ninguno"
+	fi
+	if [ "$APP_AUTO_DEPLOY" = "1" ] && [ "$with_image" -eq 0 ]; then
+		die "$EX_REGISTRY" "$file: APP_AUTO_DEPLOY=1 exige el modo registro (TIER_*_IMAGE): el CI no construye en el servidor"
+	fi
+}
+
+registry_uses_images() {                        # usa el APP_TIERS ya cargado
+	local first
+	first="${APP_TIERS%% *}"
+	[ -n "$(registry_get "$first" IMAGE)" ]
 }
 
 registry_get() {                                # $1=tier $2=clave -> valor o vacio
