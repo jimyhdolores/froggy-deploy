@@ -419,8 +419,8 @@ cmd_list() {
 				"$tier" "$(registry_get "$tier" CONTAINER)" "$(registry_get "$tier" COMPOSE)"
 			if [ -n "$(registry_get "$tier" IMAGE)" ]; then
 				rev="$(container_revision "$(registry_get "$tier" CONTAINER)" 2>/dev/null)"
-				printf '                            imagen %s, corre %s\n' "$(registry_get "$tier" IMAGE)" \
-					"${rev:+$(short_rev "$rev")}${rev:--}"
+				[ -n "$rev" ] && rev="$(short_rev "$rev")" || rev="-"
+				printf '                            imagen %s, corre %s\n' "$(registry_get "$tier" IMAGE)" "$rev"
 			fi
 		done
 		[ -z "$APP_DB" ] || printf '            base de datos: %s\n' "$APP_DB"
